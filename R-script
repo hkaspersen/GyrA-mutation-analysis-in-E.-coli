@@ -1,0 +1,183 @@
+library(stringr)
+library(msa)
+library(seqinr)
+library(dplyr)
+library(DECIPHER)
+library(gridExtra)
+
+## Functions
+
+# Loading files function
+load_files <- function(filepath) {
+  files <- list.files(filepath, pattern = ".fas")
+  unique.files <-
+    unique(gsub("(SEc\\d-[A-z]\\d-GyrA)[A-z].fas", "\\1", files))
+  my.list <- vector('list', length(unique.files))
+  
+  for (f in seq_along(unique.files)) {
+    files.sub <-
+      str_detect(files, unique.files[f])
+    files.to.do.stuff <- files[files.sub]
+    my.list[[f]] <- files.to.do.stuff
+  }
+  return(my.list)
+}
+
+# Converts DNA to protein, creates consensus sequence and writes to file
+DNA_to_prot_file <- function(file_f, file_r) {
+  forward <- readDNAStringSet(file_f)
+  reverse <- readDNAStringSet(file_r)
+  
+  # Get filename from sequence name (change regex to match needs)
+  filename <- names(forward)
+  filename <-
+    sub("\\d+.seq - ID: (.*?)[F-R] *on.*", "\\1", filename)
+  
+  # Trim sequences (adjust numbers as needed, 20 = 20 nt)
+  forward_trimmed <- gsub('^.{20}|.{20}$', '', forward)
+  reverse_trimmed <- gsub('^.{20}|.{20}$', '', reverse)
+  forward_trimmed_set <- DNAStringSet(forward_trimmed)
+  reverse_trimmed_set <- DNAStringSet(reverse_trimmed)
+  
+  # Reverse complement
+  reverse_revcomp <- reverseComplement(reverse_trimmed_set)
+  
+  # Align sequences and fetch consensus
+  # Test if sequences are present in both files
+  sequence_test <-
+    try(alignment <-
+          msa(c(forward_trimmed_set, reverse_revcomp), "ClustalW"), silent = TRUE)
+  
+  # If no sequence present, write "no seq. found" into new text file
+  if (class(sequence_test) == "try-error") {
+    write.fasta("No sequence found", filename, "no_sequences.txt", open = "a")
+    
+  # If sequences found, proceed with analysis
+  } else {
+    alignment <-
+      msa(c(forward_trimmed_set, reverse_revcomp), "ClustalW")
+    DNAstring_alignment <- DNAStringSet(alignment)
+    consensus_F_R <- ConsensusSequence(DNAstring_alignment)
+    str_consensus <- toString(consensus_F_R)
+    str_consensus <- s2c(tolower(strsplit(str_consensus, " ")))
+    
+    # Translate and test for correct frame (change string if needed)
+    # String is from E. coli GyrA reference sequence
+    correct_frame_string <- "AMSVIVGRALPDVRD"
+    
+    translated_seq <- translate(seq = str_consensus, frame = 0)
+    translated_seq_str <- toString(translated_seq)
+    translated_seq_clean <-
+      str_replace_all(translated_seq_str, "[^[:alnum:]]", " ")
+    translated_seq_str_clean <-
+      gsub(" ", "", translated_seq_clean, fixed = TRUE)
+    
+    # Compare frame to reference to identify if correct translation frame was used
+    frame_test1 <-
+      str_detect(translated_seq_str_clean, correct_frame_string)
+    if (frame_test1 == TRUE) {
+      write.fasta(translated_seq_str_clean,
+                  filename,
+                  "sequences.txt",
+                  open = "a")
+    } else if (frame_test1 == FALSE) {
+      translated_seq <- translate(seq = str_consensus, frame = 1)
+      translated_seq_str <- toString(translated_seq)
+      translated_seq_clean <-
+        str_replace_all(translated_seq_str, "[^[:alnum:]]", " ")
+      translated_seq_str_clean <-
+        gsub(" ", "", translated_seq_clean, fixed = TRUE)
+      frame_test2 <-
+        str_detect(translated_seq_str_clean, correct_frame_string)
+      if (frame_test2 == TRUE) {
+        write.fasta(translated_seq_str_clean,
+                    filename,
+                    "sequences.txt",
+                    open = "a")
+      } else if (frame_test2 == FALSE) {
+        translated_seq <- translate(seq = str_consensus, frame = 2)
+        translated_seq_str <- toString(translated_seq)
+        translated_seq_clean <-
+          str_replace_all(translated_seq_str, "[^[:alnum:]]", " ")
+        translated_seq_str_clean <-
+          gsub(" ", "", translated_seq_clean, fixed = TRUE)
+        frame_test3 <-
+          str_detect(translated_seq_str_clean, correct_frame_string)
+        if (frame_test3 == TRUE) {
+          write.fasta(translated_seq_str_clean,
+                      filename,
+                      "sequences.txt",
+                      open = "a")
+        }
+      } else {
+        translated_seq_str_clean <-
+          "Error: Sequence does not match any translation frames."
+        write.fasta(translated_seq_str_clean,
+                    filename,
+                    "sequences.txt",
+                    open = "a")
+      }
+    }
+  }
+}
+
+# Mutation analysis
+mismatches <- function(query, ref) {
+  pairwiseAlignment(ref, query, substitutionMatrix = "BLOSUM50",
+                    gapOpening = 3, gapExtension = 1) %>%
+    mismatchTable() %>%
+    mutate(ID=names(query), 
+           Pos=PatternStart, 
+           Reference_AA=as.character(PatternSubstring),
+           Sample_AA=as.character(SubjectSubstring)) %>% 
+    select(ID, Reference_AA, Sample_AA, Pos) %>%
+    filter(Pos > 49 & Pos < 124)
+}  
+
+
+
+## Append translated sequences to fasta file with reference sequece
+
+# Create text file for FASTA inputs with reference sequence as first entry
+reference <- readAAStringSet("Ecoli_GyrA.txt") 
+
+write.fasta(reference, "GyrA_Ecoli_ref", "sequences.txt", open = "w")
+
+# Load files (write file path if not in current directory)
+file_list <- load_files(".")
+file_matrix <- matrix(unlist(file_list), ncol = 2, byrow = TRUE)
+
+# Translate and write to file
+for(i in 1:nrow(file_matrix)) {
+  DNA_to_prot_file(file_matrix[i,1], file_matrix[i,2])
+  i = i+1
+}
+
+
+## Run fasta file through the mutation analysis
+
+# Import sequences
+sequences <- readAAStringSet("sequences.txt")
+
+# Run analysis
+results <-
+  bind_rows(lapply(seq_along(sequences[-1]), function(i)
+    mismatches(sequences[i + 1], sequences[1])))
+
+
+
+## Create reports
+
+# Create alignment for visual confirmation
+final_alignment <- msa(sequences)
+
+msaPrettyPrint(final_alignment, output = "tex", showLegend = F)
+
+# Write results to file
+write.table(results, "Mutation Analysis Results.txt", sep = "\t")
+
+pdf(file = "results.pdf")
+grid.table(results)
+dev.off()
+
+
