@@ -190,6 +190,7 @@ if(total_rows_per_page > nrow(results)){
   end_row = total_rows_per_page 
 }    
 
+# Create .pdf file with table output
 for(i in 1:ceiling(nrow(results)/total_rows_per_page)){
   
   grid.newpage()   
